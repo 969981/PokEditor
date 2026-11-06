@@ -1,0 +1,131 @@
+# Preserve local changes; mirror only verified upstream revisions.
+# A binary JAR is attached only when its Maven build succeeds.
+name: Sync PokEditor upstream and publish snapshot
+
+on:
+  schedule:
+    - cron: '29,59 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/upstream-sync-release.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pokeditor-upstream-release
+  cancel-in-progress: false
+
+jobs:
+  sync-build-release:
+    if: github.repository == '969981/PokEditor'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Merge upstream without force-pushing
+        id: sync
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream https://github.com/turtleisaac/PokEditor.git
+          git fetch --no-tags upstream main
+          upstream_sha="$(git rev-parse refs/remotes/upstream/main)"
+          before="$(git rev-parse HEAD)"
+          if ! git merge-base --is-ancestor "$upstream_sha" HEAD; then
+            git merge --no-ff --no-edit "$upstream_sha"
+            git push origin HEAD:refs/heads/main
+          fi
+          commit_sha="$(git rev-parse HEAD)"
+          tag="upstream-${upstream_sha:0:12}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            should_release=false
+          else
+            should_release=true
+          fi
+          {
+            echo "before=$before"
+            echo "commit=$commit_sha"
+            echo "upstream=$upstream_sha"
+            echo "tag=$tag"
+            echo "should_release=$should_release"
+          } >> "$GITHUB_OUTPUT"
+          echo "Upstream: $upstream_sha | mirror: $commit_sha | release needed: $should_release" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up JDK 21
+        if: steps.sync.outputs.should_release == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Build dependencies and runnable JAR
+        id: compile
+        if: steps.sync.outputs.should_release == 'true'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .upstream
+          for repo in Nds4j Nds4j-ToolUI PokEditor-Core; do
+            git clone --quiet --depth 1 --branch main "https://github.com/turtleisaac/$repo.git" ".upstream/$repo"
+            mvn -B -ntp -q install -DskipTests -f ".upstream/$repo/pom.xml"
+          done
+          mvn -B -ntp -Pdist clean package -DskipTests
+          jar="$(find target -maxdepth 1 -name '*-dist.jar' -type f -print -quit)"
+          test -n "$jar"
+          unzip -p "$jar" META-INF/MANIFEST.MF | grep -q 'Main-Class:'
+          mkdir -p dist
+          cp "$jar" dist/PokEditor.jar
+
+      - name: Archive exact source revision and checksums
+        if: steps.sync.outputs.should_release == 'true'
+        shell: bash
+        env:
+          UPSTREAM_SHA: ${{ steps.sync.outputs.upstream }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          git archive --format=tar --prefix=PokEditor/ HEAD | gzip -n > "dist/PokEditor-source-${UPSTREAM_SHA:0:12}.tar.gz"
+          (cd dist && sha256sum * > SHA256SUMS)
+          ls -lh dist
+
+      - name: Publish deduplicated GitHub prerelease
+        if: steps.sync.outputs.should_release == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.sync.outputs.tag }}
+          UPSTREAM_SHA: ${{ steps.sync.outputs.upstream }}
+          COMMIT_SHA: ${{ steps.sync.outputs.commit }}
+          COMPILE_STATUS: ${{ steps.compile.outcome }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Another run already published $RELEASE_TAG"
+            exit 0
+          fi
+          if [[ "$COMPILE_STATUS" == 'success' ]]; then
+            status='Runnable PokEditor.jar built successfully on Java 21.'
+          else
+            status='Source-only snapshot: runnable JAR unavailable because Maven dependency/build failed (see Actions log).'
+          fi
+          printf 'Unofficial synchronized snapshot of turtleisaac/PokEditor.\n\nUpstream: %s\nMirror: %s\n\n%s\n' "$UPSTREAM_SHA" "$COMMIT_SHA" "$status" > release-notes.md
+          gh release create "$RELEASE_TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$COMMIT_SHA" \
+            --title "PokEditor snapshot ${UPSTREAM_SHA:0:12}" \
+            --notes-file release-notes.md \
+            --prerelease
