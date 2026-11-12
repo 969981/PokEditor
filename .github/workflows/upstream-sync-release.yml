@@ -44,7 +44,14 @@ jobs:
           upstream_sha="$(git rev-parse refs/remotes/upstream/main)"
           before="$(git rev-parse HEAD)"
           if ! git merge-base --is-ancestor "$upstream_sha" HEAD; then
-            git merge --no-ff --no-edit "$upstream_sha"
+            git merge --squash --no-commit "$upstream_sha"
+            while IFS= read -r -d '' added; do
+              git rm -f -- "$added"
+            done < <(git diff --cached --name-only -z --diff-filter=A -- .github/workflows/)
+            git restore --source=HEAD --staged --worktree -- .github/workflows/
+            if ! git diff --cached --quiet; then
+              git commit -m "chore(sync): upstream source $upstream_sha (keep local workflows)"
+            fi
             git push origin HEAD:refs/heads/main
           fi
           commit_sha="$(git rev-parse HEAD)"
