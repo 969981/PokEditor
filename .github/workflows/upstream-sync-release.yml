@@ -44,7 +44,25 @@ jobs:
           upstream_sha="$(git rev-parse refs/remotes/upstream/main)"
           before="$(git rev-parse HEAD)"
           if ! git merge-base --is-ancestor "$upstream_sha" HEAD; then
-            git merge --squash --no-commit "$upstream_sha"
+            if ! git merge --squash --no-commit "$upstream_sha"; then
+              mapfile -d '' -t conflicts < <(git diff --name-only -z --diff-filter=U)
+              if (( ${#conflicts[@]} == 0 )); then
+                echo "::error::Upstream squash failed without file conflicts."
+                exit 1
+              fi
+              for file in "${conflicts[@]}"; do
+                case "$file" in
+                  .github/workflows/*)
+                    git checkout --ours -- "$file"
+                    git add -- "$file"
+                    ;;
+                  *)
+                    echo "::error::Upstream source conflict in $file; manual resolution needed."
+                    exit 1
+                    ;;
+                esac
+              done
+            fi
             while IFS= read -r -d '' added; do
               git rm -f -- "$added"
             done < <(git diff --cached --name-only -z --diff-filter=A -- .github/workflows/)
