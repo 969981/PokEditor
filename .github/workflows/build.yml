@@ -41,7 +41,7 @@ jobs:
             echo "::group::$repo @ $target"
             git clone --quiet --depth 1 --branch "$target" \
               "https://github.com/turtleisaac/$repo.git" ".upstream/$repo"
-            mvn -B -ntp -q install -DskipTests -f ".upstream/$repo/pom.xml"
+            mvn -B -ntp -q install -DskipTests -Dcheckstyle.skip -f ".upstream/$repo/pom.xml"
             echo "::endgroup::"
           done
 
