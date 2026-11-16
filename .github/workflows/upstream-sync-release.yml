@@ -44,7 +44,7 @@ jobs:
           upstream_sha="$(git rev-parse refs/remotes/upstream/main)"
           before="$(git rev-parse HEAD)"
           if ! git merge-base --is-ancestor "$upstream_sha" HEAD; then
-            if ! git merge --squash --no-commit "$upstream_sha"; then
+            if ! git merge --no-ff --no-commit "$upstream_sha"; then
               mapfile -d '' -t conflicts < <(git diff --name-only -z --diff-filter=U)
               if (( ${#conflicts[@]} == 0 )); then
                 echo "::error::Upstream squash failed without file conflicts."
@@ -52,6 +52,24 @@ jobs:
               fi
               for file in "${conflicts[@]}"; do
                 case "$file" in
+                  pom.xml)
+                    # Exact reviewed upstream POM: local POM already contains its coverage
+                    # plugins and preserves the fork's Surefire/headless and style checks.
+                    if [[ "$(git rev-parse "$upstream_sha:pom.xml")" != "4ff8d4972d235e7fc437b2ff953d8381733c9ad8" ]]; then
+                      echo "::error::Upstream pom.xml changed; merge it manually."
+                      exit 1
+                    fi
+                    git checkout --ours -- "$file"
+                    git add -- "$file"
+                    ;;
+                  .cursor/rules/java-style.mdc)
+                    if [[ "$(git rev-parse "$upstream_sha:.cursor/rules/java-style.mdc")" != "2372a2799d42efa9e505608f4d81b0822548fd20" ]]; then
+                      echo "::error::Upstream style rule changed; review required."
+                      exit 1
+                    fi
+                    git checkout --ours -- "$file"
+                    git add -- "$file"
+                    ;;
                   .github/workflows/*)
                     git checkout --ours -- "$file"
                     git add -- "$file"
